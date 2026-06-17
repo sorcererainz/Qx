@@ -1,17 +1,182 @@
 from flask import Flask, render_template, request, jsonify
-import requests
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, WebDriverException
 import time
+import os
 import json
-import re
 
 app = Flask(__name__)
 
-@app.after_request
-def after_request(response):
-    response.headers.add('Access-Control-Allow-Origin', '*')
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
-    response.headers.add('Access-Control-Allow-Methods', 'GET,POST')
-    return response
+def create_driver():
+    """Create Chrome driver with proper settings"""
+    chrome_options = Options()
+    
+    # Required for Docker/Render
+    chrome_options.add_argument("--headless=new")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--window-size=1920,1080")
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    
+    # Disable images for speed
+    prefs = {"profile.managed_default_content_settings.images": 2}
+    chrome_options.add_experimental_option("prefs", prefs)
+    
+    try:
+        driver = webdriver.Chrome(options=chrome_options)
+        driver.set_page_load_timeout(30)
+        return driver
+    except Exception as e:
+        print(f"Driver creation error: {e}")
+        return None
+
+def login_quotex(driver, email, password):
+    """Login to Quotex and return balance"""
+    try:
+        print("[*] Opening Quotex login page...")
+        driver.get("https://qxbroker.com/en/sign-in")
+        time.sleep(3)
+        
+        # Check if already logged in
+        current_url = driver.current_url
+        if 'trade' in current_url or 'platform' in current_url:
+            print("[✓] Already logged in!")
+            return extract_balance(driver)
+        
+        # Wait for login form
+        print("[*] Waiting for login form...")
+        WebDriverWait(driver, 15).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "input[type='email']"))
+        )
+        
+        # Fill email
+        print(f"[*] Entering email: {email[:20]}...")
+        email_field = driver.find_element(By.CSS_SELECTOR, "input[type='email']")
+        email_field.clear()
+        time.sleep(0.5)
+        email_field.send_keys(email)
+        
+        # Fill password
+        print("[*] Entering password...")
+        pass_field = driver.find_element(By.CSS_SELECTOR, "input[type='password']")
+        pass_field.clear()
+        time.sleep(0.5)
+        pass_field.send_keys(password)
+        
+        time.sleep(1)
+        
+        # Click login button
+        print("[*] Clicking login...")
+        login_btn = driver.find_element(By.CSS_SELECTOR, "button[type='submit']")
+        login_btn.click()
+        
+        # Wait for redirect
+        time.sleep(5)
+        
+        # Check if login successful
+        current_url = driver.current_url
+        page_text = driver.page_source.lower()
+        
+        # Check for error messages
+        error_keywords = ['invalid', 'wrong', 'incorrect', 'not found', 'error', 'failed']
+        for keyword in error_keywords:
+            if keyword in page_text:
+                print(f"[✗] Login failed: '{keyword}' found")
+                return None, f"Login failed: Invalid credentials"
+        
+        # Check if redirected to trading platform
+        if 'trade' in current_url or 'platform' in current_url or 'demo' in current_url:
+            print("[✓] Login successful!")
+            balance = extract_balance(driver)
+            return balance, None
+        else:
+            print(f"[!] Unknown redirect: {current_url}")
+            # Still try to extract balance
+            balance = extract_balance(driver)
+            return balance, None
+            
+    except TimeoutException:
+        return None, "Timeout: Quotex page took too long to load"
+    except Exception as e:
+        return None, f"Login error: {str(e)}"
+
+def extract_balance(driver):
+    """Extract balance from page"""
+    print("[*] Extracting balance...")
+    time.sleep(2)
+    
+    # Method 1: JavaScript
+    try:
+        balance = driver.execute_script("""
+            function findBalance() {
+                // Look for currency elements
+                let elements = document.querySelectorAll('div, span, p, h1, h2, h3');
+                for (let el of elements) {
+                    let text = el.textContent.trim();
+                    // Match currency patterns
+                    if (text.match(/^[\$₹€]?\s*\d{1,3}(?:,\d{3})*(?:\.\d{2})?\s*[\$₹€]?$/)) {
+                        let num = parseFloat(text.replace(/[^\d.]/g, ''));
+                        if (num > 1 && num < 1000000000) {
+                            // Check if this element is visible
+                            let style = window.getComputedStyle(el);
+                            if (style.display !== 'none' && style.visibility !== 'hidden') {
+                                return text;
+                            }
+                        }
+                    }
+                }
+                return null;
+            }
+            return findBalance();
+        """)
+        
+        if balance:
+            print(f"[✓] Balance found via JS: {balance}")
+            return balance
+    except Exception as e:
+        print(f"[!] JS extraction failed: {e}")
+    
+    # Method 2: Common CSS selectors
+    selectors = [
+        "[class*='balance']",
+        "[class*='amount']",
+        "[class*='account'] span",
+        ".header-balance",
+        ".user-balance"
+    ]
+    
+    for selector in selectors:
+        try:
+            elements = driver.find_elements(By.CSS_SELECTOR, selector)
+            for element in elements:
+                text = element.text.strip()
+                if text and ('$' in text or '₹' in text):
+                    print(f"[✓] Balance found via CSS: {text}")
+                    return text
+        except:
+            continue
+    
+    # Method 3: Full page text search
+    try:
+        body = driver.find_element(By.TAG_NAME, "body").text
+        lines = body.split('\n')
+        for line in lines:
+            if '$' in line or '₹' in line:
+                if len(line) < 30:
+                    print(f"[✓] Possible balance: {line}")
+                    return line
+    except:
+        pass
+    
+    print("[✗] Balance not found")
+    return None
 
 @app.route('/')
 def home():
@@ -23,6 +188,8 @@ def health():
 
 @app.route('/api/check_balance', methods=['POST'])
 def check_balance():
+    driver = None
+    
     try:
         data = request.get_json()
         email = data.get('email', '').strip()
@@ -34,198 +201,56 @@ def check_balance():
                 'error': 'Email and password required'
             })
         
-        session = requests.Session()
+        print(f"\n{'='*50}")
+        print(f"[*] New request for: {email[:20]}...")
         
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Accept': 'application/json, text/plain, */*',
-            'Content-Type': 'application/json',
-            'Origin': 'https://qxbroker.com',
-            'Referer': 'https://qxbroker.com/en/sign-in'
-        }
+        # Create driver
+        driver = create_driver()
+        if not driver:
+            return jsonify({
+                'success': False,
+                'error': 'Browser initialization failed'
+            })
         
-        print(f"[*] Checking balance for: {email}")
+        # Login and get balance
+        balance, error = login_quotex(driver, email, password)
         
-        # Try multiple API endpoints
-        api_urls = [
-            'https://qxbroker.com/api/v1/auth/login',
-            'https://qxbroker.com/api/auth/login',
-            'https://qxbroker.com/api/login',
-        ]
+        if driver:
+            driver.quit()
         
-        login_success = False
-        balance = None
+        if error:
+            return jsonify({
+                'success': False,
+                'error': error
+            })
         
-        for api_url in api_urls:
-            try:
-                print(f"[*] Trying: {api_url}")
-                
-                login_data = {
-                    'email': email,
-                    'password': password
-                }
-                
-                response = session.post(
-                    api_url, 
-                    json=login_data, 
-                    headers=headers, 
-                    timeout=10
-                )
-                
-                print(f"[*] Status: {response.status_code}")
-                
-                if response.status_code == 200:
-                    try:
-                        resp_json = response.json()
-                        print(f"[*] Response: {resp_json}")
-                        
-                        # Check for success indicators
-                        if resp_json.get('token') or resp_json.get('success') or 'balance' in str(resp_json).lower():
-                            login_success = True
-                            
-                            # Try to find balance in response
-                            balance = extract_balance(resp_json)
-                            if balance:
-                                break
-                                
-                    except json.JSONDecodeError:
-                        # Response is not JSON, try text
-                        text = response.text
-                        print(f"[*] Text response: {text[:200]}")
-                        balance = extract_balance_from_text(text)
-                        if balance:
-                            login_success = True
-                            break
-                            
-            except Exception as e:
-                print(f"[!] Error with {api_url}: {str(e)}")
-                continue
-        
-        # If API login failed, try web scraping approach
-        if not login_success:
-            print("[*] API failed, trying web login...")
-            balance = try_web_login(session, email, password, headers)
-            
-            if balance:
-                login_success = True
-        
-        if login_success and balance:
+        if balance:
             return jsonify({
                 'success': True,
                 'balance': balance,
                 'email': email[:15] + '...',
-                'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
+                'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
+                'auto': True
             })
         else:
             return jsonify({
                 'success': False,
-                'error': '❌ Login failed! Please check:\n1. Email and password are correct\n2. Account is active\n3. No special characters in password'
+                'error': 'Could not find balance. Try refreshing.'
             })
             
     except Exception as e:
+        if driver:
+            try:
+                driver.quit()
+            except:
+                pass
+        
         print(f"[!] Critical error: {str(e)}")
         return jsonify({
             'success': False,
-            'error': f'Server error: {str(e)}'
+            'error': f'System error: {str(e)}'
         })
 
-def extract_balance(data):
-    """Extract balance from JSON response"""
-    if isinstance(data, dict):
-        # Check common balance fields
-        balance_fields = ['balance', 'account_balance', 'user_balance', 'amount', 'equity']
-        for field in balance_fields:
-            if field in data:
-                return format_currency(data[field])
-        
-        # Search nested
-        for key, value in data.items():
-            if isinstance(value, (int, float)) and value > 1:
-                return format_currency(value)
-            if isinstance(value, dict):
-                result = extract_balance(value)
-                if result:
-                    return result
-    
-    return None
-
-def extract_balance_from_text(text):
-    """Extract balance from text response"""
-    # Look for currency patterns
-    patterns = [
-        r'\$[\d,]+\.?\d*',
-        r'₹[\d,]+\.?\d*',
-        r'[\d,]+\.?\d*\s*USD',
-        r'balance[:\s]+[\d,]+\.?\d*',
-    ]
-    
-    for pattern in patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            return match.group(0)
-    
-    return None
-
-def format_currency(value):
-    """Format as currency string"""
-    try:
-        num = float(value)
-        return f"${num:,.2f}"
-    except:
-        return str(value)
-
-def try_web_login(session, email, password, headers):
-    """Try to login via web form"""
-    try:
-        # Get login page
-        login_page = session.get('https://qxbroker.com/en/sign-in', headers=headers, timeout=10)
-        
-        # Try form submission
-        form_data = {
-            'email': email,
-            'password': password,
-            'remember': 'on'
-        }
-        
-        login_headers = headers.copy()
-        login_headers['Content-Type'] = 'application/x-www-form-urlencoded'
-        
-        response = session.post(
-            'https://qxbroker.com/en/sign-in',
-            data=form_data,
-            headers=login_headers,
-            allow_redirects=True,
-            timeout=15
-        )
-        
-        # Check if redirected to dashboard
-        if 'trade' in response.url or 'platform' in response.url:
-            print("[✓] Web login successful!")
-            
-            # Try to get balance page
-            balance_page = session.get('https://qxbroker.com/en/trade', headers=headers, timeout=10)
-            balance = extract_balance_from_text(balance_page.text)
-            
-            if balance:
-                return balance
-            else:
-                return '$10,000.00'  # Default demo balance
-        
-        return None
-        
-    except Exception as e:
-        print(f"[!] Web login error: {str(e)}")
-        return None
-
-@app.errorhandler(404)
-def not_found(e):
-    return jsonify({'error': 'Page not found'}), 404
-
-@app.errorhandler(500)
-def server_error(e):
-    return jsonify({'error': 'Server error'}), 500
-
 if __name__ == '__main__':
-    import os
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
