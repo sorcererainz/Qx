@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>QX Balance Checker</title>
+    <style>
+        body {
+            background: #0a0a0a;
+            color: #00ff00;
+            font-family: 'Courier New', monospace;
+            padding: 15px;
+            margin: 0;
+        }
+        .container {
+            max-width: 500px;
+            margin: 0 auto;
+        }
+        h1 {
+            text-align: center;
+            color: #00ff00;
+            font-size: 24px;
+            margin: 20px 0;
+        }
+        .box {
+            background: #000;
+            border: 1px solid #00ff00;
+            padding: 20px;
+            margin: 15px 0;
+            border-radius: 8px;
+        }
+        input {
+            width: 100%;
+            padding: 12px;
+            margin: 8px 0;
+            background: #111;
+            border: 1px solid #00ff00;
+            color: #00ff00;
+            font-size: 16px;
+            border-radius: 5px;
+            box-sizing: border-box;
+        }
+        button {
+            width: 100%;
+            padding: 15px;
+            background: #00ff00;
+            color: #000;
+            border: none;
+            font-size: 18px;
+            font-weight: bold;
+            border-radius: 5px;
+            margin: 10px 0;
+            cursor: pointer;
+        }
+        button:active {
+            background: #00cc00;
+        }
+        #result {
+            display: none;
+            background: #000;
+            border: 2px solid #ffd700;
+            padding: 20px;
+            text-align: center;
+            margin: 15px 0;
+            border-radius: 8px;
+        }
+        .balance-amount {
+            font-size: 36px;
+            color: #ffd700;
+            font-weight: bold;
+        }
+        .loading {
+            display: none;
+            text-align: center;
+            padding: 20px;
+            color: #00ff00;
+        }
+        .spinner {
+            border: 3px solid #333;
+            border-top: 3px solid #00ff00;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 10px auto;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        .error {
+            color: #ff4444;
+            text-align: center;
+            display: none;
+        }
+        .small-text {
+            font-size: 11px;
+            color: #666;
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>💰 QX BALANCE CHECKER</h1>
+        
+        <div class="box">
+            <p style="margin:0 0 10px 0;">> Enter Quotex Credentials:</p>
+            
+            <input type="email" id="email" placeholder="Email Address" autocomplete="off">
+            <input type="password" id="password" placeholder="Password">
+            
+            <button onclick="checkBalance()">
+                ▶ CHECK BALANCE
+            </button>
+            
+            <p class="small-text">Connecting to Quotex servers...</p>
+        </div>
+
+        <div class="loading" id="loading">
+            <div class="spinner"></div>
+            <p>Checking balance...</p>
+            <p class="small-text">This takes 10-15 seconds</p>
+        </div>
+
+        <div class="error" id="errorMsg"></div>
+
+        <div id="result">
+            <p style="color:#888;font-size:12px;margin:0;">CURRENT BALANCE</p>
+            <p class="balance-amount" id="balanceDisplay">---</p>
+            <p class="small-text" id="checkTime"></p>
+        </div>
+    </div>
+
+    <script>
+        async function checkBalance() {
+            const email = document.getElementById('email').value.trim();
+            const password = document.getElementById('password').value.trim();
+            
+            if (!email || !password) {
+                alert('Please enter both email and password!');
+                return;
+            }
+            
+            // Show loading, hide others
+            document.getElementById('loading').style.display = 'block';
+            document.getElementById('result').style.display = 'none';
+            document.getElementById('errorMsg').style.display = 'none';
+            
+            try {
+                const response = await fetch('/api/check_balance', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ 
+                        email: email, 
+                        password: password 
+                    })
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    document.getElementById('balanceDisplay').textContent = data.balance;
+                    document.getElementById('checkTime').textContent = 
+                        'Last checked: ' + new Date().toLocaleString('en-IN');
+                    document.getElementById('result').style.display = 'block';
+                } else {
+                    document.getElementById('errorMsg').textContent = 
+                        '❌ ' + (data.error || 'Unknown error');
+                    document.getElementById('errorMsg').style.display = 'block';
+                }
+            } catch (error) {
+                document.getElementById('errorMsg').textContent = 
+                    '❌ Connection failed. Please try again.';
+                document.getElementById('errorMsg').style.display = 'block';
+            } finally {
+                document.getElementById('loading').style.display = 'none';
+            }
+        }
+        
+        // Enter key se submit
+        document.getElementById('password').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                checkBalance();
+            }
+        });
+    </script>
+</body>
+</html>
