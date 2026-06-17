@@ -1,7 +1,6 @@
 services:
   - type: web
-    name: qx-balance-checker
-    env: python
+    name: qx-auto-balance
+    env: docker
     region: singapore
-    buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --timeout 60 --log-level debug
+    plan: free
